@@ -25,6 +25,7 @@ import datetime
 import json
 import os
 import random
+import re
 import sys
 import time
 import urllib.request
@@ -119,6 +120,24 @@ def random_device_id():
     return str(random.randint(10**15, 10**16 - 1))
 
 
+def scan_reward_fields(obj, path=""):
+    """递归找出响应中名字含奖励语义的数值字段，返回 [(字段路径, 值)]。
+    只报告真实存在的字段；找不到返回空表，绝不编造数字。"""
+    hits = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            p = "%s.%s" % (path, k) if path else str(k)
+            if isinstance(v, (dict, list)):
+                hits.extend(scan_reward_fields(v, p))
+            elif isinstance(v, (int, float)) and re.search(
+                    r"credit|reward|amount|bonus|increase|gain|earned", k, re.I):
+                hits.append((p, v))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            hits.extend(scan_reward_fields(v, "%s[%d]" % (path, i)))
+    return hits
+
+
 def main():
     accounts = list(iter_sessions())
     if not accounts:
@@ -152,11 +171,20 @@ def main():
                 result = checkin(token, device_id)
                 body = result["body"]
                 code = body.get("code", -1)
-            checked = body.get("checked_in", False)
+            checked = body.get("checked_in", False) or body.get("did_checked_in", False)
             ok = (result["http"] == 200) and (code == 0 or checked)
-            credits = body.get("credits", 0)
             if ok:
-                print("[%s] 签到成功，本次获得：%s 积分" % (name, credits))
+                rewards = scan_reward_fields(body)
+                if rewards:
+                    detail = "、".join("%s=%s" % (p, v) for p, v in rewards)
+                    print("[%s] 签到成功，奖励字段: %s" % (name, detail))
+                else:
+                    print("[%s] 签到成功（响应未含奖励数额字段，当日重复签到时属正常；到账以 Trae 积分明细为准）" % name)
+                try:
+                    raw = json.dumps(body, ensure_ascii=False)
+                except Exception:
+                    raw = str(body)
+                print("[%s] Trae 原始返回: %s" % (name, raw[:500]))
                 ok_names.append(name)
             else:
                 reason = body.get("message") or ("HTTP %s" % result["http"])
